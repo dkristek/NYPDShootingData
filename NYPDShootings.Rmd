@@ -1,0 +1,192 @@
+---
+title: "NYShootings"
+author: "David"
+date: "2025-01-28"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r library, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+```
+
+## NYPD Shootings Data
+### Step 1: Importing and Describing Data
+Data is sourced from here: <https://catalog.data.gov/dataset>
+
+The dataset can be found here: <https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic>
+
+This dataset covers every shooting in NYC from 2006-2023 and 
+includes location, time, and other relevant details surrounding the event.
+
+``` {r import data}
+nypd_shooting_data <- read_csv('https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD')
+```
+### Step 2: Data Summary and Clean Up
+In this step we will be removing columns that won't be used and making data less messy.
+
+First we start with dropping columns that we won't be using in the analysis. 
+Incident and jurisdiction keys will not be relevant here. The other 4 columns represent granular location data; we will not need this level of detail as we 
+can use the precinct column to get a general area for each incident. 
+```{r drop-columns}
+nypd_shooting_data <- nypd_shooting_data %>%
+  select(-c('INCIDENT_KEY','JURISDICTION_CODE','X_COORD_CD',
+            'Y_COORD_CD', Latitude, Longitude, Lon_Lat))
+```
+Here we change the formatting of the time columns to something more useful.
+
+``` {r change-date}
+nypd_shooting_data$OCCUR_DATE <- mdy(nypd_shooting_data$OCCUR_DATE)
+nypd_shooting_data$Year <- year(nypd_shooting_data$OCCUR_DATE)
+nypd_shooting_data$Hour <- hour(hms(nypd_shooting_data$OCCUR_TIME))
+nypd_shooting_data$Weekday <- wday(nypd_shooting_data$OCCUR_DATE, label = TRUE,
+                                   abbr = TRUE)
+```
+In this section we replace bad values from columns with NA. We also re-code the 
+sex columns to prepare for factoring in a later code chunk.
+
+```{r cleaning-bad-data}
+nypd_shooting_data <- nypd_shooting_data %>%
+  
+  #changing unknowns in sex columns to 'not stated' for later factoring
+  mutate(
+    VIC_SEX = recode(VIC_SEX, 'F'='F', 'M'='M', .default = 'Not Stated'),
+    PERP_SEX = recode(PERP_SEX, 'F'='F', 'M'='M', .default = 'Not Stated')
+        ) %>%
+
+  #replacing unknowns and other bad values with NA
+  mutate(across(-c(OCCUR_DATE, Year, PRECINCT, STATISTICAL_MURDER_FLAG,
+                   VIC_SEX, PERP_SEX, OCCUR_TIME, Year, Hour, Weekday), 
+                ~ na_if(.,'(null)'))) %>%
+  mutate(across(-c(OCCUR_DATE, Year, PRECINCT, STATISTICAL_MURDER_FLAG,
+                   VIC_SEX, PERP_SEX, OCCUR_TIME, Year, Hour, Weekday), 
+                ~ na_if(.,'UNKNOWN'))) %>%
+  mutate(across(-c(OCCUR_DATE,Year,, PRECINCT, STATISTICAL_MURDER_FLAG,
+                   VIC_SEX, PERP_SEX, OCCUR_TIME, Year, Hour, Weekday), 
+                ~ na_if(.,'U')))
+
+#replacing specific bad values that I found with NA
+nypd_shooting_data$PERP_AGE_GROUP[nypd_shooting_data$PERP_AGE_GROUP %in% c('1020','1028','224','940')] = NA
+
+nypd_shooting_data$VIC_AGE_GROUP[nypd_shooting_data$VIC_AGE_GROUP %in% 
+                                   c('1022')] = NA
+```
+PERP_SEX Column was left with undesirable values. Changing NA values in PERP_SEX 
+to 'Not Stated'
+```{r NA-notstated}
+nypd_shooting_data$PERP_SEX <- nypd_shooting_data$PERP_SEX %>%
+#replacing NA in PERP_SEX with 'Not Stated'
+   replace_na('Not Stated')
+```
+
+We will now factor all applicable columns to allow for easier manipulation when 
+it comes to modeling, analysis, and graphing.
+
+```{r factor}
+nypd_shooting_data <- nypd_shooting_data %>%
+  mutate(across(c(BORO,PRECINCT, PERP_AGE_GROUP, PERP_SEX, PERP_RACE, 
+                  VIC_AGE_GROUP, VIC_SEX, VIC_RACE,LOC_CLASSFCTN_DESC,
+                  LOCATION_DESC, STATISTICAL_MURDER_FLAG, Year, Hour, Weekday), factor))
+nypd_shooting_data = droplevels(nypd_shooting_data) #drop unused levels
+```
+Summary Time!
+```{r summary}
+summary(nypd_shooting_data)
+```
+## Step 3: Data Analysis and Visualization
+We will make rough barplots for a large portion of the columns. These will be
+messy but that is okay cause we're just trying to get a glimpse at any apparent
+trends or data that could be interesting to explore.
+```{r eda-vis}
+#just getting a look at the data (graphs are messy but that's okay)
+par(mfrow = c(2,2))
+for (i in 1:17){
+      barplot(table(nypd_shooting_data[i]), col = i, las = 2, main = colnames(nypd_shooting_data)[i])
+}
+```
+From the previous graphs the columns that stuck out to me were the temporal data
+(occur date/time and year)
+```{r Precincts}
+#looking at percentage of incidents in precincts
+nypd_shooting_data <- nypd_shooting_data %>%
+  add_count(BORO, PRECINCT, name = 'IncCount') %>%
+  add_count(Weekday, Hour, name ='IncCountHours') %>%
+  add_count(Year, name = 'ShootingsPerYear')
+
+incidentsPrec <- distinct(nypd_shooting_data, PRECINCT,.keep_all = TRUE) 
+incidentsPrec <- incidentsPrec %>%
+  mutate(
+    percentage= ((IncCount)/nrow(nypd_shooting_data) *100)) %>%
+  select(c(BORO ,PRECINCT, IncCount, percentage))
+#isolating top 10 highest inccount precincts
+top10precincts <- head(incidentsPrec[order(-incidentsPrec$IncCount),],n=10)
+top10precincts
+
+#plot of highest incident precincts
+PrecinctPlot <- ggplot(top10precincts,aes(PRECINCT,IncCount)) + geom_col()
+print(PrecinctPlot)
+```
+```{r Incidents-per-Year}
+#Incidents per Year by Borough
+
+  
+IncidentsPerYearByBurrough <- ggplot(nypd_shooting_data, aes(Year, fill = BORO)) +
+  geom_bar() +
+  ggtitle('SHOOTING INCIDENTS BY YEAR') +
+  ylab('Number of Incidents') +
+  xlab('Year of Incident(s)') +
+  theme(plot.title = element_text(hjust = 0.5))
+print(IncidentsPerYearByBurrough)
+
+```
+```{r Hour and Day}
+#graphing hour and day of week with incident quantity
+#labels and check what days are what with weekday
+
+IncidentsByDayHour <- ggplot(data = nypd_shooting_data, mapping = 
+                               aes(x = Weekday, y = Hour, size = IncCountHours, colour = IncCountHours) ) + scale_size(range = c(1,10)) + geom_point() + scale_color_distiller(palette = "YlOrRd", direction = 1) +
+  ylab("Hour of Day") +
+  ggtitle('Shootings by Weekday and Time of Day')
+print(IncidentsByDayHour)
+```
+
+``` {r models}
+#creating a linear regression line
+m <- lm(ShootingsPerYear ~ Year, data = nypd_shooting_data)
+
+#adding the line to the plot
+LinReg <- ggplot(nypd_shooting_data, aes(Year, ShootingsPerYear)) + geom_point() + 
+  geom_abline(aes(intercept = coef(m)[1], slope = coef(m)[2]), colour = "red")
+print(LinReg)
+#as you can see in this graph; this trend is not linear. However, if you were to separate the data into two graphs from 2006 -2019 and 2020 - Present you would see a linear trend in both. There was a massive spike in shootings in 2020 likely due to unrest during the COVID-19 Pandemic.
+
+#not enough data post 2020 so we're just gonna look before 2020
+#pre 2020
+pre2020 <- filter(nypd_shooting_data, Year == c(2006,2007,2008,2009,2010,2011,
+                                                2012,2013,2014,2015,2016,2017,
+                                                2018,2019))
+
+
+m2 <- lm(ShootingsPerYear ~ Year, data = pre2020)
+coef(m2)
+LinRegPre2020 <- ggplot(pre2020, aes(Year, ShootingsPerYear)) + geom_point() + 
+  geom_abline(aes(intercept = coef(m2)[1], slope = coef(m2)[2]), colour = "red")
+print(LinRegPre2020)
+
+```
+
+### Step 4: Conclusion and Bias Sources
+From the data we find that the Bronx and Brooklyn, together, have all of the
+top 10 highest incident count precincts. This is further shown in the Shooting Incidents By Year graph. This graph also shows an interesting trend where 
+shooting incidents rocket back up in 2020 after continually declining 
+since the mid 2000s. This trend is explored with a linear regression model. 
+Sources of bias in this analysis come include the data collectors (NYPD). Is it possible that Manhattan, Queens, and Staten Island have less police on staff 
+therefore lowering shooting incidents reported? This is just one of 
+many questions that could be raised surrounding the bias of this data.
+
